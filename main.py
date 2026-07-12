@@ -1,8 +1,11 @@
+import json
 import os
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
+from fastapi.responses import StreamingResponse
 from openai import OpenAI
+from pydantic import BaseModel
 
 app = FastAPI(title="Wayfinder OS")
 
@@ -14,8 +17,6 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
-client = OpenAI(api_key=os.environ["OPENAI_API_KEY"])
 
 class TravelQuery(BaseModel):
     query: str
@@ -41,19 +42,75 @@ If it is travel-related, provide a helpful travel guide with:
 Keep the answer complete but concise.
 """
 
+
+def ndjson(event: dict) -> str:
+    return json.dumps(event) + "\n"
+
+
+def get_event_error_message(event) -> str:
+    error = getattr(event, "error", None)
+    if error and getattr(error, "message", None):
+        return error.message
+
+    message = getattr(event, "message", None)
+    if message:
+        return message
+
+    return "Wayfinder could not complete this request. Please try again."
+
+
 @app.get("/health")
 def health():
-    return {"status": "ok", "version": "-0.000001"}
+    return {"status": "ok", "version": "v0.000001"}
 
 @app.post("/travel-query")
 def travel_query(body: TravelQuery):
-    response = client.responses.create(
-        model=os.getenv("OPENAI_MODEL", "gpt-5.2"),
-        input=[
-            {"role": "system", "content": SYSTEM_PROMPT},
-            {"role": "user", "content": body.query},
-        ],
-        max_output_tokens=1600,
-    )
+    def stream_events():
+        if not body.query.strip():
+            yield ndjson({"type": "error", "message": "Please enter a travel planning question."})
+            return
 
-    return {"answer": response.output_text.strip()}
+        if not os.getenv("OPENAI_API_KEY"):
+            yield ndjson({"type": "error", "message": "Wayfinder is not configured yet."})
+            return
+
+        try:
+            client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+            stream = client.responses.create(
+                model=os.getenv("OPENAI_MODEL", "gpt-5.2"),
+                input=[
+                    {"role": "system", "content": SYSTEM_PROMPT},
+                    {"role": "user", "content": body.query},
+                ],
+                max_output_tokens=1600,
+                stream=True,
+            )
+
+            for event in stream:
+                event_type = getattr(event, "type", None)
+
+                if event_type in ("response.output_text.delta", "response.refusal.delta"):
+                    text = getattr(event, "delta", "")
+                    if text:
+                        yield ndjson({"type": "delta", "text": text})
+
+                elif event_type in ("response.failed", "response.incomplete", "error"):
+                    yield ndjson({"type": "error", "message": get_event_error_message(event)})
+                    return
+
+            yield ndjson({"type": "done"})
+
+        except Exception:
+            yield ndjson({
+                "type": "error",
+                "message": "Wayfinder could not complete this request. Please try again.",
+            })
+
+    return StreamingResponse(
+        stream_events(),
+        media_type="application/x-ndjson",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+        },
+    )
