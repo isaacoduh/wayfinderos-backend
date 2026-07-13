@@ -61,7 +61,7 @@ def get_event_error_message(event) -> str:
 
 @app.get("/health")
 def health():
-    return {"status": "ok", "version": "v0.000001"}
+    return {"status": "ok", "version": "v0.1"}
 
 @app.post("/travel-query")
 def travel_query(body: TravelQuery):
