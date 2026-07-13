@@ -1,3 +1,7 @@
 fastapi
 uvicorn[standard]
 openai
+sqlalchemy
+alembic
+psycopg[binary]
+python-dotenv
