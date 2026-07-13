@@ -5,7 +5,7 @@ from datetime import datetime, timezone
 from datetime import time as TimeType
 from uuid import uuid4
 
-from sqlalchemy import Boolean, Date, DateTime, Float, ForeignKey, Integer, Numeric, String, Text, Time
+from sqlalchemy import Boolean, Date, DateTime, Float, ForeignKey, Integer, JSON, Numeric, String, Text, Time
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db import Base
@@ -42,6 +42,7 @@ class Trip(Base):
     status: Mapped[str] = mapped_column(String(40), default="Draft", nullable=False)
     progress: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     budget_amount: Mapped[float | None] = mapped_column(Numeric(12, 2), nullable=True)
+    planning_context: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, nullable=False)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
@@ -73,6 +74,11 @@ class Trip(Base):
         back_populates="trip",
         cascade="all, delete-orphan",
         order_by="AgentEvent.created_at.desc()",
+    )
+    agent_runs: Mapped[list["AgentRun"]] = relationship(
+        back_populates="trip",
+        cascade="all, delete-orphan",
+        order_by="AgentRun.started_at.desc()",
     )
 
 
@@ -198,9 +204,40 @@ class AgentEvent(Base):
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uuid_pk)
     trip_id: Mapped[str] = mapped_column(ForeignKey("trips.id", ondelete="CASCADE"), index=True, nullable=False)
+    agent_run_id: Mapped[str | None] = mapped_column(
+        ForeignKey("agent_runs.id", ondelete="CASCADE"),
+        index=True,
+        nullable=True,
+    )
+    event_type: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    payload: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     title: Mapped[str] = mapped_column(String(180), nullable=False)
     detail: Mapped[str | None] = mapped_column(Text, nullable=True)
     status: Mapped[str] = mapped_column(String(40), default="active", nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, nullable=False)
 
     trip: Mapped[Trip] = relationship(back_populates="agent_events")
+    agent_run: Mapped["AgentRun | None"] = relationship(back_populates="events")
+
+
+class AgentRun(Base):
+    __tablename__ = "agent_runs"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uuid_pk)
+    trip_id: Mapped[str] = mapped_column(ForeignKey("trips.id", ondelete="CASCADE"), index=True, nullable=False)
+    user_id: Mapped[str] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True, nullable=False)
+    run_type: Mapped[str] = mapped_column(String(60), nullable=False)
+    status: Mapped[str] = mapped_column(String(40), default="running", nullable=False)
+    input_text: Mapped[str] = mapped_column(Text, nullable=False)
+    output_summary: Mapped[str | None] = mapped_column(Text, nullable=True)
+    error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, nullable=False)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    trip: Mapped[Trip] = relationship(back_populates="agent_runs")
+    user: Mapped[User] = relationship()
+    events: Mapped[list[AgentEvent]] = relationship(
+        back_populates="agent_run",
+        cascade="all, delete-orphan",
+        order_by="AgentEvent.created_at.asc()",
+    )

@@ -46,6 +46,7 @@ class TripRead(TripBase):
 
     id: str
     user_id: str
+    planning_context: dict | None = None
     created_at: datetime
     updated_at: datetime
 
