@@ -47,7 +47,79 @@ class TripRead(TripBase):
     id: str
     user_id: str
     planning_context: dict | None = None
+    share_slug: str | None = None
+    share_enabled: bool = False
+    share_created_at: datetime | None = None
+    share_updated_at: datetime | None = None
     created_at: datetime
+    updated_at: datetime
+
+
+class TripShareStatus(BaseModel):
+    share_enabled: bool
+    share_slug: str | None = None
+    share_path: str | None = None
+    share_created_at: datetime | None = None
+    share_updated_at: datetime | None = None
+
+
+class PublicTripPlaceRead(BaseModel):
+    name: str
+    category: str | None = None
+    city: str | None = None
+    country: str | None = None
+    status: str
+    notes: str | None = None
+    priority: int | None = None
+
+
+class PublicItineraryItemRead(BaseModel):
+    title: str
+    description: str | None = None
+    start_time: TimeType | None = None
+    end_time: TimeType | None = None
+    category: str | None = None
+    is_booked: bool = False
+
+
+class PublicItineraryDayRead(BaseModel):
+    day_number: int
+    date: DateType | None = None
+    title: str | None = None
+    summary: str | None = None
+    items: list[PublicItineraryItemRead] = []
+
+
+class PublicChecklistItemRead(BaseModel):
+    title: str
+    due_label: str | None = None
+    priority: str | None = None
+    is_completed: bool = False
+
+
+class PublicTripBudgetRead(BaseModel):
+    currency: str = "USD"
+    total_estimate: Decimal | None = None
+    notes: list[str] = []
+    categories: list[dict] = []
+
+
+class PublicTripRead(BaseModel):
+    title: str
+    destination: str
+    start_date: DateType | None = None
+    end_date: DateType | None = None
+    status: str
+    progress: int
+    summary: str | None = None
+    budget_amount: Decimal | None = None
+    budget: PublicTripBudgetRead | None = None
+    itinerary_days: list[PublicItineraryDayRead] = []
+    places: list[PublicTripPlaceRead] = []
+    checklist_items: list[PublicChecklistItemRead] = []
+    assumptions: list[str] = []
+    warnings: list[str] = []
+    generated_at: datetime | None = None
     updated_at: datetime
 
 

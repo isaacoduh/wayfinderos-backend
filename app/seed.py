@@ -4,7 +4,7 @@ from decimal import Decimal
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.api import BETA_USER_EMAIL, BETA_USER_NAME
+from app.config import BETA_USER_EMAIL, BETA_USER_NAME
 from app.db import SessionLocal
 from app.models import AgentEvent, ChatMessage, ItineraryDay, ItineraryItem, Place, Trip, TripPlace, User
 

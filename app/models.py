@@ -43,6 +43,10 @@ class Trip(Base):
     progress: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     budget_amount: Mapped[float | None] = mapped_column(Numeric(12, 2), nullable=True)
     planning_context: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    share_slug: Mapped[str | None] = mapped_column(String(220), nullable=True, unique=True, index=True)
+    share_enabled: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    share_created_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    share_updated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, nullable=False)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),

@@ -1,12 +1,17 @@
 from __future__ import annotations
 
+import logging
+import re
+from secrets import token_hex
+
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import select
 from sqlalchemy.orm import Session, joinedload, selectinload
 
 from app.config import CHAT_ROLES, TRIP_PLACE_STATUSES
 from app.db import get_db
-from app.models import AgentEvent, AgentRun, ChatMessage, ChecklistItem, ItineraryDay, ItineraryItem, Place, Trip, TripPlace
+from app.logging import get_logger, log_event
+from app.models import AgentEvent, AgentRun, ChatMessage, ChecklistItem, ItineraryDay, ItineraryItem, Place, Trip, TripPlace, utc_now
 from app.schemas import (
     AgentEventRead,
     AgentRunRead,
@@ -18,16 +23,130 @@ from app.schemas import (
     ItineraryItemPatch,
     ItineraryItemRead,
     PlaceCreate,
+    PublicChecklistItemRead,
+    PublicItineraryDayRead,
+    PublicItineraryItemRead,
+    PublicTripBudgetRead,
+    PublicTripPlaceRead,
+    PublicTripRead,
     TripCreate,
     TripPatch,
     TripPlacePatch,
     TripPlaceRead,
     TripRead,
+    TripShareStatus,
     UserRead,
 )
 from app.services.auth import apply_patch_values, get_beta_trip_or_404, get_or_create_beta_user
 
 router = APIRouter()
+logger = get_logger("wayfinder.api")
+
+
+def slug_prefix(value: str) -> str:
+    slug = re.sub(r"[^a-z0-9]+", "-", value.lower()).strip("-")
+    return slug[:44].strip("-") or "trip"
+
+
+def generate_share_slug(db: Session, trip: Trip) -> str:
+    prefix = slug_prefix(f"{trip.title} {trip.destination}")
+    for _ in range(8):
+        candidate = f"{prefix}-{token_hex(3)}"
+        if not db.scalar(select(Trip.id).where(Trip.share_slug == candidate)):
+            return candidate
+    return f"{prefix}-{token_hex(6)}"
+
+
+def share_status_for_trip(trip: Trip) -> TripShareStatus:
+    return TripShareStatus(
+        share_enabled=trip.share_enabled,
+        share_slug=trip.share_slug,
+        share_path=f"/share/{trip.share_slug}" if trip.share_slug else None,
+        share_created_at=trip.share_created_at,
+        share_updated_at=trip.share_updated_at,
+    )
+
+
+def public_budget_from_context(build_trip: dict) -> PublicTripBudgetRead | None:
+    budget = build_trip.get("budget")
+    if not isinstance(budget, dict):
+        return None
+    return PublicTripBudgetRead(
+        currency=budget.get("currency") or "USD",
+        total_estimate=budget.get("total_estimate"),
+        notes=budget.get("notes") or [],
+        categories=budget.get("categories") or [],
+    )
+
+
+def public_trip_response(trip: Trip) -> PublicTripRead:
+    build_trip = (trip.planning_context or {}).get("build_trip") or {}
+    public_places = sorted(
+        trip.trip_places,
+        key=lambda trip_place: (
+            trip_place.priority is None,
+            trip_place.priority or 0,
+            trip_place.place.name if trip_place.place else "",
+        ),
+    )
+    public_checklist = sorted(trip.checklist_items, key=lambda item: (item.is_completed, item.created_at))
+    return PublicTripRead(
+        title=trip.title,
+        destination=trip.destination,
+        start_date=trip.start_date,
+        end_date=trip.end_date,
+        status=trip.status,
+        progress=trip.progress,
+        summary=build_trip.get("trip_summary"),
+        budget_amount=trip.budget_amount,
+        budget=public_budget_from_context(build_trip),
+        itinerary_days=[
+            PublicItineraryDayRead(
+                day_number=day.day_number,
+                date=day.date,
+                title=day.title,
+                summary=day.summary,
+                items=[
+                    PublicItineraryItemRead(
+                        title=item.title,
+                        description=item.description,
+                        start_time=item.start_time,
+                        end_time=item.end_time,
+                        category=item.category,
+                        is_booked=item.is_booked,
+                    )
+                    for item in day.items
+                ],
+            )
+            for day in trip.itinerary_days
+        ],
+        places=[
+            PublicTripPlaceRead(
+                name=trip_place.place.name,
+                category=trip_place.place.category,
+                city=trip_place.place.city,
+                country=trip_place.place.country,
+                status=trip_place.status,
+                notes=trip_place.notes,
+                priority=trip_place.priority,
+            )
+            for trip_place in public_places
+            if trip_place.place
+        ],
+        checklist_items=[
+            PublicChecklistItemRead(
+                title=item.title,
+                due_label=item.due_label,
+                priority=item.priority,
+                is_completed=item.is_completed,
+            )
+            for item in public_checklist
+        ],
+        assumptions=build_trip.get("assumptions") or [],
+        warnings=build_trip.get("warnings") or [],
+        generated_at=build_trip.get("last_built_at"),
+        updated_at=trip.updated_at,
+    )
 
 
 @router.post("/dev/login", response_model=UserRead)
@@ -59,6 +178,60 @@ def create_trip(body: TripCreate, db: Session = Depends(get_db)):
 @router.get("/trips/{trip_id}", response_model=TripRead)
 def get_trip(trip_id: str, db: Session = Depends(get_db)):
     return get_beta_trip_or_404(db, trip_id)
+
+
+@router.get("/trips/{trip_id}/share", response_model=TripShareStatus)
+def get_trip_share_status(trip_id: str, db: Session = Depends(get_db)):
+    trip = get_beta_trip_or_404(db, trip_id)
+    return share_status_for_trip(trip)
+
+
+@router.post("/trips/{trip_id}/share", response_model=TripShareStatus)
+def enable_trip_share(trip_id: str, db: Session = Depends(get_db)):
+    trip = get_beta_trip_or_404(db, trip_id)
+    now = utc_now()
+
+    if not trip.share_slug:
+        trip.share_slug = generate_share_slug(db, trip)
+    if not trip.share_created_at:
+        trip.share_created_at = now
+    trip.share_enabled = True
+    trip.share_updated_at = now
+
+    db.commit()
+    db.refresh(trip)
+    log_event(logger, logging.INFO, "share.enabled", trip_id=trip.id, share_slug=trip.share_slug)
+    return share_status_for_trip(trip)
+
+
+@router.delete("/trips/{trip_id}/share", response_model=TripShareStatus)
+def disable_trip_share(trip_id: str, db: Session = Depends(get_db)):
+    trip = get_beta_trip_or_404(db, trip_id)
+    trip.share_enabled = False
+    trip.share_updated_at = utc_now()
+
+    db.commit()
+    db.refresh(trip)
+    log_event(logger, logging.INFO, "share.disabled", trip_id=trip.id, share_slug=trip.share_slug)
+    return share_status_for_trip(trip)
+
+
+@router.get("/public/trips/{share_slug}", response_model=PublicTripRead)
+def get_public_trip(share_slug: str, db: Session = Depends(get_db)):
+    trip = db.scalar(
+        select(Trip)
+        .where(Trip.share_slug == share_slug, Trip.share_enabled.is_(True))
+        .options(
+            selectinload(Trip.itinerary_days).selectinload(ItineraryDay.items),
+            selectinload(Trip.trip_places).joinedload(TripPlace.place),
+            selectinload(Trip.checklist_items),
+        )
+    )
+    if not trip:
+        raise HTTPException(status_code=404, detail="Trip not found")
+
+    log_event(logger, logging.INFO, "share.viewed", share_slug=share_slug)
+    return public_trip_response(trip)
 
 
 @router.patch("/trips/{trip_id}", response_model=TripRead)
