@@ -177,6 +177,9 @@ class AgentEventRead(BaseModel):
 
     id: str
     trip_id: str
+    agent_run_id: str | None
+    event_type: str | None
+    payload: dict | None
     title: str
     detail: str | None
     status: str

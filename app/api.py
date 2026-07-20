@@ -1,21 +1,40 @@
 import json
 import os
 import re
+import time
 from collections.abc import Iterable
+from datetime import datetime
+from decimal import Decimal, InvalidOperation
 
+import logging
 from fastapi import Depends, FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from openai import OpenAI
-from pydantic import BaseModel, Field
-from sqlalchemy import select
+from pydantic import BaseModel, Field, ValidationError
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session, joinedload, selectinload
 
 from app.db import SessionLocal, get_db
-from app.models import AgentEvent, AgentRun, ChatMessage, ItineraryDay, ItineraryItem, Place, Trip, TripPlace, User, utc_now
+from app.logging import configure_logging, get_logger, log_event
+from app.models import (
+    AgentEvent,
+    AgentRun,
+    ChatMessage,
+    ChecklistItem,
+    ItineraryDay,
+    ItineraryItem,
+    Place,
+    Trip,
+    TripPlace,
+    User,
+    utc_now,
+)
 from app.schemas import (
+    AgentEventRead,
     ChatMessageCreate,
     ChatMessageRead,
+    ChecklistItemRead,
     ItineraryDayCreate,
     ItineraryDayRead,
     ItineraryItemPatch,
@@ -29,6 +48,9 @@ from app.schemas import (
     UserRead,
 )
 
+configure_logging()
+logger = get_logger("wayfinder.api")
+
 app = FastAPI(title="Wayfinder OS")
 
 frontend_origin = os.getenv("FRONTEND_ORIGIN", "*")
@@ -39,6 +61,27 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+@app.middleware("http")
+async def structured_request_logging(request, call_next):
+    start = time.perf_counter()
+    response = None
+
+    try:
+        response = await call_next(request)
+        return response
+    finally:
+        duration_ms = round((time.perf_counter() - start) * 1000, 2)
+        log_event(
+            logger,
+            logging.INFO,
+            "request.completed",
+            method=request.method,
+            path=request.url.path,
+            status_code=getattr(response, "status_code", 500),
+            duration_ms=duration_ms,
+        )
 
 BETA_USER_EMAIL = os.getenv("BETA_USER_EMAIL", "beta@wayfinder.test")
 BETA_USER_NAME = os.getenv("BETA_USER_NAME", "Beta Tester")
@@ -53,6 +96,62 @@ class TravelQuery(BaseModel):
 
 class TripChatRequest(BaseModel):
     message: str = Field(min_length=1)
+
+
+class BuildTripBudgetCategory(BaseModel):
+    name: str = Field(min_length=1, max_length=80)
+    amount: float = Field(ge=0)
+
+
+class BuildTripBudget(BaseModel):
+    currency: str = Field(default="GBP", min_length=3, max_length=3)
+    total_estimate: float | None = Field(default=None, ge=0)
+    notes: list[str] = []
+    categories: list[BuildTripBudgetCategory] = []
+
+
+class BuildTripPlace(BaseModel):
+    name: str = Field(min_length=1, max_length=180)
+    category: str | None = Field(default=None, max_length=80)
+    city: str | None = Field(default=None, max_length=120)
+    country: str | None = Field(default=None, max_length=120)
+    reason: str | None = None
+
+
+class BuildTripItineraryItem(BaseModel):
+    title: str = Field(min_length=1, max_length=220)
+    description: str | None = None
+    start_time: str | None = None
+    end_time: str | None = None
+    category: str | None = Field(default=None, max_length=80)
+    place_name: str | None = None
+    is_locked: bool = False
+    is_booked: bool = False
+    sort_order: int = 0
+
+
+class BuildTripItineraryDay(BaseModel):
+    day_number: int = Field(ge=1)
+    title: str | None = Field(default=None, max_length=180)
+    summary: str | None = None
+    items: list[BuildTripItineraryItem] = []
+
+
+class BuildTripChecklistItem(BaseModel):
+    title: str = Field(min_length=1, max_length=220)
+    description: str | None = None
+    due_label: str | None = Field(default=None, max_length=120)
+    priority: str | None = Field(default="medium", max_length=40)
+
+
+class BuildTripOutput(BaseModel):
+    trip_summary: str = Field(min_length=1)
+    assumptions: list[str] = []
+    warnings: list[str] = []
+    budget: BuildTripBudget | None = None
+    places: list[BuildTripPlace] = []
+    itinerary: list[BuildTripItineraryDay] = []
+    checklist: list[BuildTripChecklistItem] = []
 
 
 SYSTEM_PROMPT = """
@@ -87,6 +186,66 @@ itinerary, places, transport, or budget.
 Keep responses concise, practical, and grounded in the current trip. Do not claim to
 have changed the itinerary, places, or budget unless an explicit tool or endpoint has
 actually made that change.
+"""
+
+BUILD_TRIP_SYSTEM_PROMPT = """
+You are Wayfinder OS running the Build My Trip workflow.
+You turn trip context and conversation into durable travel-planning artifacts.
+
+Return only one valid JSON object matching this shape:
+{
+  "trip_summary": "short user-facing summary",
+  "assumptions": ["short assumption"],
+  "warnings": ["short warning"],
+  "budget": {
+    "currency": "GBP",
+    "total_estimate": 500,
+    "notes": ["short note"],
+    "categories": [{"name": "Transport", "amount": 80}]
+  },
+  "places": [
+    {
+      "name": "Place name",
+      "category": "Museum",
+      "city": "City",
+      "country": "Country",
+      "reason": "Why it fits"
+    }
+  ],
+  "itinerary": [
+    {
+      "day_number": 1,
+      "title": "Day title",
+      "summary": "Day summary",
+      "items": [
+        {
+          "title": "Activity title",
+          "description": "Useful concise detail",
+          "start_time": "09:30",
+          "end_time": "10:00",
+          "category": "Transit",
+          "place_name": null,
+          "is_locked": false,
+          "is_booked": false,
+          "sort_order": 1
+        }
+      ]
+    }
+  ],
+  "checklist": [
+    {
+      "title": "Task title",
+      "description": "Task detail",
+      "due_label": "Before departure",
+      "priority": "medium"
+    }
+  ]
+}
+
+Use existing locked or booked itinerary items as constraints. Do not contradict them.
+If origin, duration, budget, dates, or preferences are known, use them.
+Keep the plan practical and specific to the destination.
+Use null for unknown optional fields. Do not include markdown.
 """
 
 
@@ -290,6 +449,275 @@ def build_trip_context_prompt(
     )
 
 
+def build_structured_trip_prompt(
+    trip: Trip,
+    recent_messages: list[ChatMessage],
+    days: list[ItineraryDay],
+    places: list[TripPlace],
+) -> str:
+    return "\n".join(
+        [
+            build_trip_context_prompt(trip, recent_messages, days, places),
+            "",
+            "Build a complete trip plan now.",
+            "Persistable artifact requirements:",
+            "- Generate itinerary days/items for the trip duration if known.",
+            "- Include transport guidance from the known origin when present.",
+            "- Recommend concrete places in the destination.",
+            "- Include budget notes and category estimates.",
+            "- Include booking/checklist tasks.",
+            "- Keep locked/booked saved itinerary items respected as immovable constraints.",
+        ]
+    )
+
+
+def parse_json_object(text: str) -> dict:
+    cleaned = text.strip()
+    if cleaned.startswith("```"):
+        cleaned = re.sub(r"^```(?:json)?\s*", "", cleaned)
+        cleaned = re.sub(r"\s*```$", "", cleaned)
+
+    try:
+        return json.loads(cleaned)
+    except json.JSONDecodeError:
+        start = cleaned.find("{")
+        end = cleaned.rfind("}")
+        if start == -1 or end == -1 or end <= start:
+            raise
+        return json.loads(cleaned[start : end + 1])
+
+
+def get_response_text(response) -> str:
+    output_text = getattr(response, "output_text", None)
+    if output_text:
+        return output_text
+
+    chunks = []
+    for output in getattr(response, "output", []) or []:
+        for content in getattr(output, "content", []) or []:
+            text = getattr(content, "text", None)
+            if text:
+                chunks.append(text)
+    return "".join(chunks)
+
+
+def parse_time_string(value: str | None):
+    if not value:
+        return None
+
+    try:
+        return datetime.strptime(value, "%H:%M").time()
+    except ValueError:
+        return None
+
+
+def normalize_place_key(name: str, city: str | None, country: str | None) -> tuple[str, str, str]:
+    return (name.strip().lower(), (city or "").strip().lower(), (country or "").strip().lower())
+
+
+def get_or_create_generated_place(db: Session, place_data: BuildTripPlace) -> Place:
+    name = place_data.name.strip()
+    city = place_data.city.strip() if place_data.city else None
+    country = place_data.country.strip() if place_data.country else None
+
+    place = db.scalar(
+        select(Place).where(
+            func.lower(Place.name) == name.lower(),
+            func.coalesce(func.lower(Place.city), "") == (city or "").lower(),
+            func.coalesce(func.lower(Place.country), "") == (country or "").lower(),
+        )
+    )
+    if place:
+        if place_data.category and not place.category:
+            place.category = place_data.category
+        return place
+
+    place = Place(
+        name=name,
+        category=place_data.category,
+        city=city,
+        country=country,
+    )
+    db.add(place)
+    db.flush()
+    return place
+
+
+def link_place_to_trip(
+    db: Session,
+    *,
+    trip_id: str,
+    place: Place,
+    notes: str | None = None,
+    priority: int | None = None,
+) -> TripPlace:
+    trip_place = db.scalar(select(TripPlace).where(TripPlace.trip_id == trip_id, TripPlace.place_id == place.id))
+    if trip_place:
+        if notes and not trip_place.notes:
+            trip_place.notes = notes
+        if priority is not None and trip_place.priority is None:
+            trip_place.priority = priority
+        return trip_place
+
+    trip_place = TripPlace(
+        trip_id=trip_id,
+        place_id=place.id,
+        status="suggested",
+        notes=notes,
+        priority=priority,
+    )
+    db.add(trip_place)
+    db.flush()
+    return trip_place
+
+
+def replace_generated_itinerary(
+    db: Session,
+    *,
+    trip_id: str,
+    generated_days: list[BuildTripItineraryDay],
+    places_by_key: dict[tuple[str, str, str], Place],
+) -> tuple[int, int, int]:
+    existing_days = db.scalars(
+        select(ItineraryDay)
+        .where(ItineraryDay.trip_id == trip_id)
+        .options(selectinload(ItineraryDay.items))
+        .order_by(ItineraryDay.day_number.asc())
+    ).all()
+
+    preserved_by_day: dict[str, int] = {}
+    preserved_count = 0
+    for day in existing_days:
+        preserved_for_day = 0
+        for item in list(day.items):
+            if item.is_locked or item.is_booked:
+                preserved_count += 1
+                preserved_for_day += 1
+            else:
+                db.delete(item)
+        preserved_by_day[day.id] = preserved_for_day
+
+    db.flush()
+
+    for day in list(existing_days):
+        if preserved_by_day.get(day.id, 0) == 0:
+            db.delete(day)
+
+    db.flush()
+
+    days_by_number = {
+        day.day_number: day
+        for day in db.scalars(
+            select(ItineraryDay)
+            .where(ItineraryDay.trip_id == trip_id)
+            .options(selectinload(ItineraryDay.items))
+            .order_by(ItineraryDay.day_number.asc())
+        ).all()
+    }
+
+    item_count = 0
+    for generated_day in generated_days:
+        day = days_by_number.get(generated_day.day_number)
+        if not day:
+            day = ItineraryDay(trip_id=trip_id, day_number=generated_day.day_number)
+            db.add(day)
+            db.flush()
+            days_by_number[generated_day.day_number] = day
+
+        day.title = generated_day.title
+        day.summary = generated_day.summary
+        preserved_sort_offset = len([item for item in day.items if item.is_locked or item.is_booked])
+
+        for index, item_data in enumerate(generated_day.items):
+            place = None
+            if item_data.place_name:
+                place_key = normalize_place_key(item_data.place_name, None, None)
+                place = places_by_key.get(place_key)
+                if not place:
+                    place = db.scalar(select(Place).where(func.lower(Place.name) == item_data.place_name.lower()))
+
+            db.add(
+                ItineraryItem(
+                    itinerary_day_id=day.id,
+                    place_id=place.id if place else None,
+                    title=item_data.title,
+                    description=item_data.description,
+                    start_time=parse_time_string(item_data.start_time),
+                    end_time=parse_time_string(item_data.end_time),
+                    category=item_data.category,
+                    is_locked=False,
+                    is_booked=False,
+                    sort_order=item_data.sort_order or preserved_sort_offset + index + 1,
+                )
+            )
+            item_count += 1
+
+    return (len(generated_days), item_count, preserved_count)
+
+
+def persist_build_trip_output(db: Session, *, trip: Trip, output: BuildTripOutput) -> dict:
+    places_by_key: dict[tuple[str, str, str], Place] = {}
+    for index, place_data in enumerate(output.places):
+        place = get_or_create_generated_place(db, place_data)
+        link_place_to_trip(db, trip_id=trip.id, place=place, notes=place_data.reason, priority=index + 1)
+        places_by_key[normalize_place_key(place.name, place.city, place.country)] = place
+        places_by_key[normalize_place_key(place.name, None, None)] = place
+
+    days_count, items_count, preserved_count = replace_generated_itinerary(
+        db,
+        trip_id=trip.id,
+        generated_days=output.itinerary,
+        places_by_key=places_by_key,
+    )
+
+    existing_task_titles = {
+        title.lower()
+        for title in db.scalars(select(ChecklistItem.title).where(ChecklistItem.trip_id == trip.id)).all()
+    }
+    checklist_count = 0
+    for item in output.checklist:
+        if item.title.lower() in existing_task_titles:
+            continue
+        due_label = item.due_label or item.description
+        db.add(
+            ChecklistItem(
+                trip_id=trip.id,
+                title=item.title,
+                due_label=due_label[:120] if due_label else None,
+                priority=item.priority,
+                is_completed=False,
+            )
+        )
+        checklist_count += 1
+
+    planning_context = dict(trip.planning_context or {})
+    planning_context["build_trip"] = {
+        "trip_summary": output.trip_summary,
+        "assumptions": output.assumptions,
+        "warnings": output.warnings,
+        "budget": output.budget.model_dump() if output.budget else None,
+        "last_built_at": utc_now().isoformat(),
+    }
+    trip.planning_context = planning_context
+    trip.status = "Planning"
+    trip.progress = max(trip.progress, 60)
+
+    if output.budget and output.budget.total_estimate is not None:
+        try:
+            trip.budget_amount = Decimal(str(output.budget.total_estimate))
+        except InvalidOperation:
+            pass
+
+    return {
+        "places": len(output.places),
+        "days": days_count,
+        "items": items_count,
+        "preserved_items": preserved_count,
+        "checklist_items": checklist_count,
+        "budget_estimated": bool(output.budget),
+    }
+
+
 def create_agent_event(
     db: Session,
     *,
@@ -340,7 +768,7 @@ def apply_patch_values(model, patch: BaseModel, fields: Iterable[str]) -> None:
 
 @app.get("/health")
 def health():
-    return {"status": "ok", "version": "v0.3"}
+    return {"status": "ok", "version": "v0.4"}
 
 
 @app.post("/dev/login", response_model=UserRead)
@@ -517,6 +945,328 @@ def patch_trip_place(trip_place_id: str, body: TripPlacePatch, db: Session = Dep
     )
 
 
+@app.get("/trips/{trip_id}/checklist", response_model=list[ChecklistItemRead])
+def list_checklist(trip_id: str, db: Session = Depends(get_db)):
+    get_beta_trip_or_404(db, trip_id)
+    return db.scalars(
+        select(ChecklistItem)
+        .where(ChecklistItem.trip_id == trip_id)
+        .order_by(ChecklistItem.is_completed.asc(), ChecklistItem.created_at.asc())
+    ).all()
+
+
+@app.get("/trips/{trip_id}/agent-events", response_model=list[AgentEventRead])
+def list_agent_events(trip_id: str, db: Session = Depends(get_db)):
+    get_beta_trip_or_404(db, trip_id)
+    return db.scalars(
+        select(AgentEvent)
+        .where(AgentEvent.trip_id == trip_id)
+        .order_by(AgentEvent.created_at.desc())
+        .limit(30)
+    ).all()
+
+
+@app.post("/trips/{trip_id}/agent/build-trip")
+def build_trip_agent(trip_id: str, db: Session = Depends(get_db)):
+    user = get_or_create_beta_user(db)
+    trip = db.scalar(select(Trip).where(Trip.id == trip_id, Trip.user_id == user.id))
+    if not trip:
+        raise HTTPException(status_code=404, detail="Trip not found")
+
+    run = AgentRun(
+        trip_id=trip.id,
+        user_id=user.id,
+        run_type="build_trip",
+        status="running",
+        input_text="Build My Trip",
+    )
+    db.add(run)
+    db.flush()
+    create_agent_event(db, run=run, event_type="agent_run.started", payload={"run_type": "build_trip"}, status="active")
+    db.commit()
+    log_event(
+        logger,
+        logging.INFO,
+        "agent_run.started",
+        agent_run_id=run.id,
+        trip_id=trip.id,
+        user_id=user.id,
+        run_type="build_trip",
+    )
+
+    run_id = run.id
+    trip_id_for_stream = trip.id
+
+    def stream_events():
+        stream_db = SessionLocal()
+
+        def emit(run_record: AgentRun, event_type: str, payload: dict | None = None, status: str = "complete"):
+            create_agent_event(stream_db, run=run_record, event_type=event_type, payload=payload or {}, status=status)
+            stream_db.commit()
+            log_event(
+                logger,
+                logging.INFO,
+                event_type,
+                agent_run_id=run_record.id,
+                trip_id=run_record.trip_id,
+                status=status,
+                payload=payload or {},
+            )
+            return ndjson({"type": "agent_event", "event": event_type, "payload": payload or {}})
+
+        try:
+            run_record = stream_db.get(AgentRun, run_id)
+            if not run_record:
+                yield ndjson({"type": "error", "message": "Build My Trip run could not be loaded."})
+                return
+
+            yield ndjson(
+                {
+                    "type": "agent_event",
+                    "event": "agent_run.started",
+                    "payload": {"agent_run_id": run_id},
+                }
+            )
+
+            if not os.getenv("OPENAI_API_KEY"):
+                run_record.status = "failed"
+                run_record.error_message = "Wayfinder is not configured yet."
+                run_record.finished_at = utc_now()
+                create_agent_event(
+                    stream_db,
+                    run=run_record,
+                    event_type="agent_run.failed",
+                    payload={"message": "Wayfinder is not configured yet."},
+                    status="failed",
+                )
+                stream_db.commit()
+                log_event(
+                    logger,
+                    logging.ERROR,
+                    "agent_run.failed",
+                    agent_run_id=run_record.id,
+                    trip_id=run_record.trip_id,
+                    run_type="build_trip",
+                    error="Wayfinder is not configured yet.",
+                )
+                yield ndjson({"type": "error", "message": "Wayfinder is not configured yet."})
+                return
+
+            trip_record = stream_db.scalar(
+                select(Trip)
+                .where(Trip.id == trip_id_for_stream)
+                .options(selectinload(Trip.messages))
+            )
+            if not trip_record:
+                raise RuntimeError("Trip could not be loaded.")
+
+            recent_messages = list(
+                reversed(
+                    stream_db.scalars(
+                        select(ChatMessage)
+                        .where(ChatMessage.trip_id == trip_id_for_stream)
+                        .order_by(ChatMessage.created_at.desc())
+                        .limit(12)
+                    ).all()
+                )
+            )
+            days = stream_db.scalars(
+                select(ItineraryDay)
+                .where(ItineraryDay.trip_id == trip_id_for_stream)
+                .options(selectinload(ItineraryDay.items))
+                .order_by(ItineraryDay.day_number.asc())
+            ).all()
+            places = stream_db.scalars(
+                select(TripPlace)
+                .where(TripPlace.trip_id == trip_id_for_stream)
+                .options(joinedload(TripPlace.place))
+                .order_by(TripPlace.priority.asc().nullslast(), TripPlace.created_at.asc())
+            ).unique().all()
+
+            yield emit(
+                run_record,
+                "trip.context_loaded",
+                {
+                    "messages": len(recent_messages),
+                    "days": len(days),
+                    "places": len(places),
+                },
+            )
+
+            prompt = build_structured_trip_prompt(trip_record, recent_messages, days, places)
+            yield emit(run_record, "build_trip.prompt_prepared", {"characters": len(prompt)})
+
+            client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+            log_event(
+                logger,
+                logging.INFO,
+                "build_trip.llm_request.started",
+                agent_run_id=run_record.id,
+                trip_id=trip_id_for_stream,
+                model=os.getenv("OPENAI_MODEL", "gpt-5.2"),
+            )
+            response = client.responses.create(
+                model=os.getenv("OPENAI_MODEL", "gpt-5.2"),
+                input=[
+                    {"role": "system", "content": BUILD_TRIP_SYSTEM_PROMPT},
+                    {"role": "user", "content": prompt},
+                ],
+                max_output_tokens=5000,
+            )
+
+            response_text = get_response_text(response)
+            if not response_text.strip():
+                raise RuntimeError("Build My Trip returned an empty response.")
+
+            try:
+                output = BuildTripOutput.model_validate(parse_json_object(response_text))
+            except (ValidationError, json.JSONDecodeError) as exc:
+                raise RuntimeError(f"Build My Trip returned invalid structured output: {exc}") from exc
+
+            yield emit(
+                run_record,
+                "build_trip.output_received",
+                {
+                    "days": len(output.itinerary),
+                    "places": len(output.places),
+                    "checklist_items": len(output.checklist),
+                },
+            )
+
+            counts = persist_build_trip_output(stream_db, trip=trip_record, output=output)
+            log_event(
+                logger,
+                logging.INFO,
+                "build_trip.persistence.completed",
+                agent_run_id=run_record.id,
+                trip_id=trip_id_for_stream,
+                counts=counts,
+            )
+            create_agent_event(stream_db, run=run_record, event_type="place.recommended", payload={"count": counts["places"]})
+            create_agent_event(
+                stream_db,
+                run=run_record,
+                event_type="itinerary.generated",
+                payload={
+                    "days": counts["days"],
+                    "items": counts["items"],
+                    "preserved_items": counts["preserved_items"],
+                },
+            )
+            create_agent_event(
+                stream_db,
+                run=run_record,
+                event_type="booking_checklist.generated",
+                payload={"count": counts["checklist_items"]},
+            )
+            if counts["budget_estimated"]:
+                create_agent_event(
+                    stream_db,
+                    run=run_record,
+                    event_type="budget.estimated",
+                    payload={"total_estimate": output.budget.total_estimate if output.budget else None},
+                )
+
+            assistant_message = ChatMessage(
+                trip_id=trip_id_for_stream,
+                role="assistant",
+                content=output.trip_summary,
+            )
+            stream_db.add(assistant_message)
+            run_record.status = "completed"
+            run_record.output_summary = output.trip_summary[:500]
+            run_record.finished_at = utc_now()
+            create_agent_event(
+                stream_db,
+                run=run_record,
+                event_type="agent_run.completed",
+                payload=counts,
+                status="complete",
+            )
+            stream_db.commit()
+            log_event(
+                logger,
+                logging.INFO,
+                "agent_run.completed",
+                agent_run_id=run_record.id,
+                trip_id=trip_id_for_stream,
+                run_type="build_trip",
+                counts=counts,
+            )
+
+            yield ndjson({"type": "agent_event", "event": "place.recommended", "payload": {"count": counts["places"]}})
+            yield ndjson(
+                {
+                    "type": "agent_event",
+                    "event": "itinerary.generated",
+                    "payload": {
+                        "days": counts["days"],
+                        "items": counts["items"],
+                        "preserved_items": counts["preserved_items"],
+                    },
+                }
+            )
+            yield ndjson(
+                {
+                    "type": "agent_event",
+                    "event": "booking_checklist.generated",
+                    "payload": {"count": counts["checklist_items"]},
+                }
+            )
+            if counts["budget_estimated"]:
+                yield ndjson(
+                    {
+                        "type": "agent_event",
+                        "event": "budget.estimated",
+                        "payload": {"total_estimate": output.budget.total_estimate if output.budget else None},
+                    }
+                )
+            yield ndjson({"type": "delta", "text": output.trip_summary})
+            yield ndjson({"type": "done", "agent_run_id": run_id})
+
+        except Exception as exc:
+            stream_db.rollback()
+            run_record = stream_db.get(AgentRun, run_id)
+            if run_record:
+                run_record.status = "failed"
+                run_record.error_message = str(exc)
+                run_record.finished_at = utc_now()
+                create_agent_event(
+                    stream_db,
+                    run=run_record,
+                    event_type="agent_run.failed",
+                    payload={"message": str(exc)[:500]},
+                    status="failed",
+                )
+                stream_db.commit()
+                log_event(
+                    logger,
+                    logging.ERROR,
+                    "agent_run.failed",
+                    agent_run_id=run_record.id,
+                    trip_id=run_record.trip_id,
+                    run_type="build_trip",
+                    error=str(exc),
+                )
+            yield ndjson(
+                {
+                    "type": "error",
+                    "message": "Wayfinder could not build this trip. Please try again.",
+                }
+            )
+        finally:
+            stream_db.close()
+
+    return StreamingResponse(
+        stream_events(),
+        media_type="application/x-ndjson",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
 @app.post("/trips/{trip_id}/chat")
 def trip_chat(trip_id: str, body: TripChatRequest, db: Session = Depends(get_db)):
     text = body.message.strip()
@@ -539,6 +1289,15 @@ def trip_chat(trip_id: str, body: TripChatRequest, db: Session = Depends(get_db)
     run = AgentRun(trip_id=trip.id, user_id=user.id, run_type="trip_chat", status="running", input_text=text)
     db.add_all([user_message, run])
     db.commit()
+    log_event(
+        logger,
+        logging.INFO,
+        "agent_run.started",
+        agent_run_id=run.id,
+        trip_id=trip.id,
+        user_id=user.id,
+        run_type="trip_chat",
+    )
 
     run_id = run.id
     trip_id_for_stream = trip.id
@@ -642,6 +1401,14 @@ def trip_chat(trip_id: str, body: TripChatRequest, db: Session = Depends(get_db)
             run_record.finished_at = utc_now()
             create_agent_event(stream_db, run=run_record, event_type="assistant_message.created", payload={})
             stream_db.commit()
+            log_event(
+                logger,
+                logging.INFO,
+                "agent_run.completed",
+                agent_run_id=run_record.id,
+                trip_id=trip_id_for_stream,
+                run_type="trip_chat",
+            )
 
             yield ndjson({"type": "agent_event", "event": "assistant_message.created", "payload": {}})
             yield ndjson({"type": "done"})
@@ -653,6 +1420,15 @@ def trip_chat(trip_id: str, body: TripChatRequest, db: Session = Depends(get_db)
                 run_record.error_message = str(exc)
                 run_record.finished_at = utc_now()
                 stream_db.commit()
+                log_event(
+                    logger,
+                    logging.ERROR,
+                    "agent_run.failed",
+                    agent_run_id=run_record.id,
+                    trip_id=trip_id_for_stream,
+                    run_type="trip_chat",
+                    error=str(exc),
+                )
             yield ndjson(
                 {
                     "type": "error",
