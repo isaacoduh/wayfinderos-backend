@@ -228,9 +228,12 @@ class AgentRun(Base):
     user_id: Mapped[str] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True, nullable=False)
     run_type: Mapped[str] = mapped_column(String(60), nullable=False)
     status: Mapped[str] = mapped_column(String(40), default="running", nullable=False)
+    job_id: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    idempotency_key: Mapped[str | None] = mapped_column(String(160), nullable=True)
     input_text: Mapped[str] = mapped_column(Text, nullable=False)
     output_summary: Mapped[str | None] = mapped_column(Text, nullable=True)
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    queued_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, nullable=False)
     finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 

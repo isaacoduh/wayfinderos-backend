@@ -184,3 +184,21 @@ class AgentEventRead(BaseModel):
     detail: str | None
     status: str
     created_at: datetime
+
+
+class AgentRunRead(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: str
+    trip_id: str
+    user_id: str
+    run_type: str
+    status: str
+    job_id: str | None
+    input_text: str
+    output_summary: str | None
+    error_message: str | None
+    queued_at: datetime | None
+    started_at: datetime
+    finished_at: datetime | None
+    events: list[AgentEventRead] = []

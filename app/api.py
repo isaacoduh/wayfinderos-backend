@@ -46,7 +46,7 @@ async def structured_request_logging(request, call_next):
 
 @app.get("/health")
 def health():
-    return {"status": "ok", "version": "v0.5"}
+    return {"status": "ok", "version": "v0.6"}
 
 
 app.include_router(trips.router)

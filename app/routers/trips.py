@@ -6,9 +6,10 @@ from sqlalchemy.orm import Session, joinedload, selectinload
 
 from app.config import CHAT_ROLES, TRIP_PLACE_STATUSES
 from app.db import get_db
-from app.models import AgentEvent, ChatMessage, ChecklistItem, ItineraryDay, ItineraryItem, Place, Trip, TripPlace
+from app.models import AgentEvent, AgentRun, ChatMessage, ChecklistItem, ItineraryDay, ItineraryItem, Place, Trip, TripPlace
 from app.schemas import (
     AgentEventRead,
+    AgentRunRead,
     ChatMessageCreate,
     ChatMessageRead,
     ChecklistItemRead,
@@ -222,3 +223,16 @@ def list_agent_events(trip_id: str, db: Session = Depends(get_db)):
         .order_by(AgentEvent.created_at.desc())
         .limit(30)
     ).all()
+
+
+@router.get("/trips/{trip_id}/agent-runs/{agent_run_id}", response_model=AgentRunRead)
+def get_agent_run(trip_id: str, agent_run_id: str, db: Session = Depends(get_db)):
+    user = get_or_create_beta_user(db)
+    run = db.scalar(
+        select(AgentRun)
+        .where(AgentRun.id == agent_run_id, AgentRun.trip_id == trip_id, AgentRun.user_id == user.id)
+        .options(selectinload(AgentRun.events))
+    )
+    if not run:
+        raise HTTPException(status_code=404, detail="Agent run not found")
+    return run

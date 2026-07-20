@@ -3,7 +3,7 @@ from __future__ import annotations
 from decimal import Decimal, InvalidOperation
 
 from sqlalchemy import func, select
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, selectinload
 
 from app.agent.schemas import BuildTripItineraryDay, BuildTripItineraryItem, BuildTripOutput, BuildTripPlace, RegenerateDayOutput
 from app.models import ChecklistItem, ItineraryDay, ItineraryItem, Place, Trip, TripPlace, utc_now
@@ -200,13 +200,13 @@ def replace_generated_itinerary(
     preserved_by_day: dict[str, int] = {}
     preserved_count = 0
     for day in existing_days:
-        preserved_for_day = 0
-        for item in list(day.items):
-            if item.is_locked or item.is_booked:
-                preserved_count += 1
-                preserved_for_day += 1
-            else:
-                db.delete(item)
+        protected_items = [item for item in day.items if item.is_locked or item.is_booked]
+        preserved_for_day = len(protected_items)
+        preserved_count += preserved_for_day
+        if preserved_for_day:
+            for item in list(day.items):
+                if not item.is_locked and not item.is_booked:
+                    db.delete(item)
         preserved_by_day[day.id] = preserved_for_day
 
     db.flush()
