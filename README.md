@@ -27,14 +27,15 @@ Wayfinder OS v0.8 uses Clerk for login/signup and verifies Clerk session tokens 
 Required frontend env:
 
 ```bash
-VITE_CLERK_PUBLISHABLE_KEY=pk_test_...
+NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY=pk_test_...
+NEXT_PUBLIC_API_URL=http://localhost:8000
 ```
 
 Required backend env:
 
 ```bash
 CLERK_SECRET_KEY=sk_test_...
-CLERK_AUTHORIZED_PARTIES=http://localhost:5173
+CLERK_AUTHORIZED_PARTIES=http://localhost:3000
 ```
 
 For networkless JWT verification, also set `CLERK_JWT_KEY` to the PEM public key from the Clerk dashboard. Store it with escaped newlines if your environment requires a single-line value.
