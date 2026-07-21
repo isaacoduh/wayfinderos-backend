@@ -16,9 +16,9 @@ from app.agent.schemas import BuildTripOutput, RegenerateDayOutput, RegenerateDa
 from app.config import openai_model
 from app.db import SessionLocal, get_db
 from app.logging import get_logger, log_event
-from app.models import AgentRun, ChatMessage, ItineraryDay, ItineraryItem, Trip, TripPlace, utc_now
+from app.models import AgentRun, ChatMessage, ItineraryDay, ItineraryItem, Trip, TripPlace, User, utc_now
 from app.services.agent_context import build_regenerate_day_prompt, build_structured_trip_prompt, build_trip_context_prompt
-from app.services.auth import get_or_create_beta_user
+from app.services.auth import get_current_user
 from app.services.events import create_agent_event
 from app.services.persistence import persist_build_trip_output, persist_regenerate_day_output
 from app.services.planning_context import extract_trip_context_updates, merge_planning_context
@@ -29,7 +29,12 @@ logger = get_logger("wayfinder.api")
 
 
 @router.post("/trips/{trip_id}/chat")
-def trip_chat(trip_id: str, body: TripChatRequest, db: Session = Depends(get_db)):
+def trip_chat(
+    trip_id: str,
+    body: TripChatRequest,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
     text = body.message.strip()
     if not text:
         return StreamingResponse(
@@ -37,7 +42,6 @@ def trip_chat(trip_id: str, body: TripChatRequest, db: Session = Depends(get_db)
             media_type="application/x-ndjson",
         )
 
-    user = get_or_create_beta_user(db)
     trip = db.scalar(select(Trip).where(Trip.id == trip_id, Trip.user_id == user.id))
     if not trip:
         raise HTTPException(status_code=404, detail="Trip not found")
@@ -210,7 +214,7 @@ def trip_chat(trip_id: str, body: TripChatRequest, db: Session = Depends(get_db)
 
 
 @router.post("/travel-query")
-def travel_query(body: TravelQuery):
+def travel_query(body: TravelQuery, user: User = Depends(get_current_user)):
     def stream_events():
         if not body.query.strip():
             yield ndjson({"type": "error", "message": "Please enter a travel planning question."})

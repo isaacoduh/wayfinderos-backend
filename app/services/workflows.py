@@ -91,10 +91,13 @@ def handle_workflow_exception(db, run: AgentRun, message: str) -> None:
     mark_run_failed(db, run, message)
 
 
-def load_trip_workflow_context(db, trip_id: str):
+def load_trip_workflow_context(db, run: AgentRun):
+    trip_id = run.trip_id
     trip = db.scalar(select(Trip).where(Trip.id == trip_id).options(selectinload(Trip.messages)))
     if not trip:
         raise RuntimeError("Trip could not be loaded.")
+    if trip.user_id != run.user_id:
+        raise RuntimeError("Trip ownership does not match this workflow run.")
 
     recent_messages = list(
         reversed(
@@ -151,7 +154,7 @@ def run_build_trip_workflow(agent_run_id: str) -> None:
             mark_run_failed(db, run, "Wayfinder is not configured yet.")
             return
 
-        trip, recent_messages, days, places = load_trip_workflow_context(db, run.trip_id)
+        trip, recent_messages, days, places = load_trip_workflow_context(db, run)
         emit_agent_event(
             db,
             run,
@@ -257,7 +260,7 @@ def run_regenerate_day_workflow(agent_run_id: str, day_id: str) -> None:
             mark_run_failed(db, run, "Wayfinder is not configured yet.")
             return
 
-        trip, recent_messages, days, places = load_trip_workflow_context(db, run.trip_id)
+        trip, recent_messages, days, places = load_trip_workflow_context(db, run)
         selected_day = db.scalar(
             select(ItineraryDay)
             .where(ItineraryDay.id == day_id, ItineraryDay.trip_id == run.trip_id)

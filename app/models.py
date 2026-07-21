@@ -5,7 +5,7 @@ from datetime import datetime, timezone
 from datetime import time as TimeType
 from uuid import uuid4
 
-from sqlalchemy import Boolean, Date, DateTime, Float, ForeignKey, Integer, JSON, Numeric, String, Text, Time
+from sqlalchemy import Boolean, Date, DateTime, Float, ForeignKey, Integer, JSON, Numeric, String, Text, Time, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db import Base
@@ -21,11 +21,21 @@ def uuid_pk() -> str:
 
 class User(Base):
     __tablename__ = "users"
+    __table_args__ = (UniqueConstraint("auth_provider", "auth_provider_user_id", name="uq_users_auth_provider_user_id"),)
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uuid_pk)
     display_name: Mapped[str] = mapped_column(String(120), nullable=False)
-    email: Mapped[str] = mapped_column(String(255), nullable=False, unique=True, index=True)
+    email: Mapped[str | None] = mapped_column(String(255), nullable=True, index=True)
+    auth_provider: Mapped[str] = mapped_column(String(40), default="dev", nullable=False)
+    auth_provider_user_id: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
+    avatar_url: Mapped[str | None] = mapped_column(String(500), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=utc_now,
+        onupdate=utc_now,
+        nullable=False,
+    )
 
     trips: Mapped[list["Trip"]] = relationship(back_populates="user", cascade="all, delete-orphan")
 

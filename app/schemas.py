@@ -13,7 +13,8 @@ class UserRead(BaseModel):
 
     id: str
     display_name: str
-    email: str
+    email: str | None = None
+    avatar_url: str | None = None
     created_at: datetime
 
 

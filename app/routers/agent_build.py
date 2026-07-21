@@ -8,9 +8,9 @@ from sqlalchemy.orm import Session
 
 from app.db import get_db
 from app.logging import get_logger, log_event
-from app.models import AgentRun, Trip, utc_now
+from app.models import AgentRun, Trip, User, utc_now
 from app.queue import get_workflow_queue, workflow_retry
-from app.services.auth import get_or_create_beta_user
+from app.services.auth import get_current_user
 from app.services.events import create_agent_event
 from app.services.workflows import run_build_trip_workflow
 
@@ -23,8 +23,8 @@ def build_trip_agent(
     trip_id: str,
     idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
     db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
 ):
-    user = get_or_create_beta_user(db)
     trip = db.scalar(select(Trip).where(Trip.id == trip_id, Trip.user_id == user.id))
     if not trip:
         raise HTTPException(status_code=404, detail="Trip not found")

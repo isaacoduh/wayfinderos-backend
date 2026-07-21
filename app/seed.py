@@ -10,11 +10,25 @@ from app.models import AgentEvent, ChatMessage, ItineraryDay, ItineraryItem, Pla
 
 
 def get_or_create_user(db: Session) -> User:
-    user = db.scalar(select(User).where(User.email == BETA_USER_EMAIL))
+    user = db.scalar(
+        select(User).where(
+            User.auth_provider == "dev",
+            User.auth_provider_user_id == "shared-beta",
+        )
+    )
+    if not user:
+        user = db.scalar(select(User).where(User.email == BETA_USER_EMAIL))
     if user:
+        user.auth_provider = "dev"
+        user.auth_provider_user_id = "shared-beta"
         return user
 
-    user = User(display_name=BETA_USER_NAME, email=BETA_USER_EMAIL)
+    user = User(
+        display_name=BETA_USER_NAME,
+        email=BETA_USER_EMAIL,
+        auth_provider="dev",
+        auth_provider_user_id="shared-beta",
+    )
     db.add(user)
     db.flush()
     return user

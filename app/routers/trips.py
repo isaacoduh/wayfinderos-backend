@@ -8,10 +8,10 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import select
 from sqlalchemy.orm import Session, joinedload, selectinload
 
-from app.config import CHAT_ROLES, TRIP_PLACE_STATUSES
+from app.config import AUTH_DEV_BYPASS, CHAT_ROLES, TRIP_PLACE_STATUSES
 from app.db import get_db
 from app.logging import get_logger, log_event
-from app.models import AgentEvent, AgentRun, ChatMessage, ChecklistItem, ItineraryDay, ItineraryItem, Place, Trip, TripPlace, utc_now
+from app.models import AgentEvent, AgentRun, ChatMessage, ChecklistItem, ItineraryDay, ItineraryItem, Place, Trip, TripPlace, User, utc_now
 from app.schemas import (
     AgentEventRead,
     AgentRunRead,
@@ -37,7 +37,7 @@ from app.schemas import (
     TripShareStatus,
     UserRead,
 )
-from app.services.auth import apply_patch_values, get_beta_trip_or_404, get_or_create_beta_user
+from app.services.auth import apply_patch_values, get_current_user, get_or_create_beta_user, get_owned_trip_or_404
 
 router = APIRouter()
 logger = get_logger("wayfinder.api")
@@ -151,23 +151,25 @@ def public_trip_response(trip: Trip) -> PublicTripRead:
 
 @router.post("/dev/login", response_model=UserRead)
 def dev_login(db: Session = Depends(get_db)):
+    if not AUTH_DEV_BYPASS:
+        raise HTTPException(status_code=404, detail="Not found")
     return get_or_create_beta_user(db)
 
 
 @router.get("/dev/session", response_model=UserRead)
 def dev_session(db: Session = Depends(get_db)):
+    if not AUTH_DEV_BYPASS:
+        raise HTTPException(status_code=404, detail="Not found")
     return get_or_create_beta_user(db)
 
 
 @router.get("/trips", response_model=list[TripRead])
-def list_trips(db: Session = Depends(get_db)):
-    user = get_or_create_beta_user(db)
+def list_trips(db: Session = Depends(get_db), user: User = Depends(get_current_user)):
     return db.scalars(select(Trip).where(Trip.user_id == user.id).order_by(Trip.updated_at.desc())).all()
 
 
 @router.post("/trips", response_model=TripRead)
-def create_trip(body: TripCreate, db: Session = Depends(get_db)):
-    user = get_or_create_beta_user(db)
+def create_trip(body: TripCreate, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
     trip = Trip(user_id=user.id, **body.model_dump())
     db.add(trip)
     db.commit()
@@ -176,19 +178,19 @@ def create_trip(body: TripCreate, db: Session = Depends(get_db)):
 
 
 @router.get("/trips/{trip_id}", response_model=TripRead)
-def get_trip(trip_id: str, db: Session = Depends(get_db)):
-    return get_beta_trip_or_404(db, trip_id)
+def get_trip(trip_id: str, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+    return get_owned_trip_or_404(db, trip_id, user)
 
 
 @router.get("/trips/{trip_id}/share", response_model=TripShareStatus)
-def get_trip_share_status(trip_id: str, db: Session = Depends(get_db)):
-    trip = get_beta_trip_or_404(db, trip_id)
+def get_trip_share_status(trip_id: str, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+    trip = get_owned_trip_or_404(db, trip_id, user)
     return share_status_for_trip(trip)
 
 
 @router.post("/trips/{trip_id}/share", response_model=TripShareStatus)
-def enable_trip_share(trip_id: str, db: Session = Depends(get_db)):
-    trip = get_beta_trip_or_404(db, trip_id)
+def enable_trip_share(trip_id: str, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+    trip = get_owned_trip_or_404(db, trip_id, user)
     now = utc_now()
 
     if not trip.share_slug:
@@ -205,8 +207,8 @@ def enable_trip_share(trip_id: str, db: Session = Depends(get_db)):
 
 
 @router.delete("/trips/{trip_id}/share", response_model=TripShareStatus)
-def disable_trip_share(trip_id: str, db: Session = Depends(get_db)):
-    trip = get_beta_trip_or_404(db, trip_id)
+def disable_trip_share(trip_id: str, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+    trip = get_owned_trip_or_404(db, trip_id, user)
     trip.share_enabled = False
     trip.share_updated_at = utc_now()
 
@@ -235,8 +237,8 @@ def get_public_trip(share_slug: str, db: Session = Depends(get_db)):
 
 
 @router.patch("/trips/{trip_id}", response_model=TripRead)
-def patch_trip(trip_id: str, body: TripPatch, db: Session = Depends(get_db)):
-    trip = get_beta_trip_or_404(db, trip_id)
+def patch_trip(trip_id: str, body: TripPatch, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+    trip = get_owned_trip_or_404(db, trip_id, user)
     apply_patch_values(
         trip,
         body,
@@ -248,16 +250,16 @@ def patch_trip(trip_id: str, body: TripPatch, db: Session = Depends(get_db)):
 
 
 @router.get("/trips/{trip_id}/messages", response_model=list[ChatMessageRead])
-def list_messages(trip_id: str, db: Session = Depends(get_db)):
-    get_beta_trip_or_404(db, trip_id)
+def list_messages(trip_id: str, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+    get_owned_trip_or_404(db, trip_id, user)
     return db.scalars(
         select(ChatMessage).where(ChatMessage.trip_id == trip_id).order_by(ChatMessage.created_at.asc())
     ).all()
 
 
 @router.post("/trips/{trip_id}/messages", response_model=ChatMessageRead)
-def create_message(trip_id: str, body: ChatMessageCreate, db: Session = Depends(get_db)):
-    get_beta_trip_or_404(db, trip_id)
+def create_message(trip_id: str, body: ChatMessageCreate, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+    get_owned_trip_or_404(db, trip_id, user)
     role = body.role.lower()
     if role not in CHAT_ROLES:
         raise HTTPException(status_code=422, detail="Message role must be user, assistant, or system")
@@ -270,8 +272,8 @@ def create_message(trip_id: str, body: ChatMessageCreate, db: Session = Depends(
 
 
 @router.get("/trips/{trip_id}/itinerary", response_model=list[ItineraryDayRead])
-def list_itinerary(trip_id: str, db: Session = Depends(get_db)):
-    get_beta_trip_or_404(db, trip_id)
+def list_itinerary(trip_id: str, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+    get_owned_trip_or_404(db, trip_id, user)
     return db.scalars(
         select(ItineraryDay)
         .where(ItineraryDay.trip_id == trip_id)
@@ -281,8 +283,8 @@ def list_itinerary(trip_id: str, db: Session = Depends(get_db)):
 
 
 @router.post("/trips/{trip_id}/itinerary/days", response_model=ItineraryDayRead)
-def create_itinerary_day(trip_id: str, body: ItineraryDayCreate, db: Session = Depends(get_db)):
-    get_beta_trip_or_404(db, trip_id)
+def create_itinerary_day(trip_id: str, body: ItineraryDayCreate, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+    get_owned_trip_or_404(db, trip_id, user)
     day = ItineraryDay(trip_id=trip_id, **body.model_dump())
     db.add(day)
     db.commit()
@@ -291,8 +293,7 @@ def create_itinerary_day(trip_id: str, body: ItineraryDayCreate, db: Session = D
 
 
 @router.patch("/itinerary-items/{item_id}", response_model=ItineraryItemRead)
-def patch_itinerary_item(item_id: str, body: ItineraryItemPatch, db: Session = Depends(get_db)):
-    user = get_or_create_beta_user(db)
+def patch_itinerary_item(item_id: str, body: ItineraryItemPatch, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
     item = db.scalar(
         select(ItineraryItem)
         .join(ItineraryDay)
@@ -313,8 +314,8 @@ def patch_itinerary_item(item_id: str, body: ItineraryItemPatch, db: Session = D
 
 
 @router.get("/trips/{trip_id}/places", response_model=list[TripPlaceRead])
-def list_places(trip_id: str, db: Session = Depends(get_db)):
-    get_beta_trip_or_404(db, trip_id)
+def list_places(trip_id: str, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+    get_owned_trip_or_404(db, trip_id, user)
     return db.scalars(
         select(TripPlace)
         .where(TripPlace.trip_id == trip_id)
@@ -324,8 +325,8 @@ def list_places(trip_id: str, db: Session = Depends(get_db)):
 
 
 @router.post("/trips/{trip_id}/places", response_model=TripPlaceRead)
-def create_place(trip_id: str, body: PlaceCreate, db: Session = Depends(get_db)):
-    get_beta_trip_or_404(db, trip_id)
+def create_place(trip_id: str, body: PlaceCreate, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+    get_owned_trip_or_404(db, trip_id, user)
     if body.status not in TRIP_PLACE_STATUSES:
         raise HTTPException(status_code=422, detail="Place status is invalid")
 
@@ -355,8 +356,7 @@ def create_place(trip_id: str, body: PlaceCreate, db: Session = Depends(get_db))
 
 
 @router.patch("/trip-places/{trip_place_id}", response_model=TripPlaceRead)
-def patch_trip_place(trip_place_id: str, body: TripPlacePatch, db: Session = Depends(get_db)):
-    user = get_or_create_beta_user(db)
+def patch_trip_place(trip_place_id: str, body: TripPlacePatch, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
     trip_place = db.scalar(
         select(TripPlace)
         .join(Trip)
@@ -378,8 +378,8 @@ def patch_trip_place(trip_place_id: str, body: TripPlacePatch, db: Session = Dep
 
 
 @router.get("/trips/{trip_id}/checklist", response_model=list[ChecklistItemRead])
-def list_checklist(trip_id: str, db: Session = Depends(get_db)):
-    get_beta_trip_or_404(db, trip_id)
+def list_checklist(trip_id: str, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+    get_owned_trip_or_404(db, trip_id, user)
     return db.scalars(
         select(ChecklistItem)
         .where(ChecklistItem.trip_id == trip_id)
@@ -388,8 +388,8 @@ def list_checklist(trip_id: str, db: Session = Depends(get_db)):
 
 
 @router.get("/trips/{trip_id}/agent-events", response_model=list[AgentEventRead])
-def list_agent_events(trip_id: str, db: Session = Depends(get_db)):
-    get_beta_trip_or_404(db, trip_id)
+def list_agent_events(trip_id: str, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+    get_owned_trip_or_404(db, trip_id, user)
     return db.scalars(
         select(AgentEvent)
         .where(AgentEvent.trip_id == trip_id)
@@ -399,8 +399,12 @@ def list_agent_events(trip_id: str, db: Session = Depends(get_db)):
 
 
 @router.get("/trips/{trip_id}/agent-runs/{agent_run_id}", response_model=AgentRunRead)
-def get_agent_run(trip_id: str, agent_run_id: str, db: Session = Depends(get_db)):
-    user = get_or_create_beta_user(db)
+def get_agent_run(
+    trip_id: str,
+    agent_run_id: str,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
     run = db.scalar(
         select(AgentRun)
         .where(AgentRun.id == agent_run_id, AgentRun.trip_id == trip_id, AgentRun.user_id == user.id)

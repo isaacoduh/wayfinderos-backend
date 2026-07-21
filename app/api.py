@@ -31,6 +31,17 @@ async def structured_request_logging(request, call_next):
     try:
         response = await call_next(request)
         return response
+    except Exception:
+        logger.exception(
+            "request.failed",
+            extra={
+                "structured": {
+                    "method": request.method,
+                    "path": request.url.path,
+                }
+            },
+        )
+        raise
     finally:
         duration_ms = round((time.perf_counter() - start) * 1000, 2)
         log_event(
@@ -46,7 +57,7 @@ async def structured_request_logging(request, call_next):
 
 @app.get("/health")
 def health():
-    return {"status": "ok", "version": "v0.7"}
+    return {"status": "ok", "version": "v0.8"}
 
 
 app.include_router(trips.router)

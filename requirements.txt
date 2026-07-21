@@ -7,3 +7,4 @@ psycopg[binary]
 python-dotenv
 redis
 rq
+clerk-backend-api
