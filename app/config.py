@@ -15,6 +15,7 @@ DEFAULT_OPENAI_MODEL = "gpt-5.2"
 REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379/0")
 WORKFLOW_QUEUE_NAME = os.getenv("WORKFLOW_QUEUE_NAME", "wayfinder")
 AUTH_DEV_BYPASS = os.getenv("AUTH_DEV_BYPASS", "").lower() in {"1", "true", "yes"}
+LOG_REQUESTS = os.getenv("LOG_REQUESTS", "").lower() in {"1", "true", "yes"}
 CLERK_SECRET_KEY = os.getenv("CLERK_SECRET_KEY")
 CLERK_JWT_KEY = os.getenv("CLERK_JWT_KEY")
 if CLERK_JWT_KEY and "\\n" in CLERK_JWT_KEY:
