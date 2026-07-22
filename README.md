@@ -6,6 +6,10 @@ Current status: `v1.0.1 demo polish`
 
 This backend powers the Wayfinder OS demo and case-study artifact. It provides authenticated trip APIs, durable PostgreSQL state, trip-aware chat, Redis-backed async agent workflows, and public read-only share payloads.
 
+Deployed API: [web-production-61b12.up.railway.app](https://web-production-61b12.up.railway.app/)
+
+Frontend demo: [wayfinderos.netlify.app](https://wayfinderos.netlify.app/)
+
 ## Architecture Overview
 
 The backend is a FastAPI application with a small worker process:
@@ -129,6 +133,12 @@ NEXT_PUBLIC_API_URL=http://localhost:8000
 NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY=<your_clerk_publishable_key>
 ```
 
+For the deployed demo frontend:
+
+```bash
+NEXT_PUBLIC_API_URL=https://web-production-61b12.up.railway.app
+```
+
 For networkless Clerk JWT verification, set `CLERK_JWT_KEY` to the PEM public key from the Clerk dashboard. Store it with escaped newlines if the deployment environment requires a single-line value.
 
 For local demo work only, `AUTH_DEV_BYPASS=true` re-enables the seeded shared beta user for protected routes. Keep this unset or `false` outside local development.
@@ -174,6 +184,13 @@ A production-like deployment needs:
 - `CLERK_AUTHORIZED_PARTIES` set to the allowed frontend origin(s).
 - `OPENAI_API_KEY` available to both chat/API paths and worker workflows.
 - `REDIS_URL` available to both API and worker services.
+
+Current deployed demo values:
+
+```bash
+FRONTEND_ORIGIN=https://wayfinderos.netlify.app
+CLERK_AUTHORIZED_PARTIES=https://wayfinderos.netlify.app
+```
 
 Do not run seed scripts against production data unless the deployment is intentionally disposable.
 
